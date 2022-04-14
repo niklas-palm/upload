@@ -1,0 +1,443 @@
+AWSTemplateFormatVersion: 2010-09-09
+Transform: AWS::Serverless-2016-10-31 # To use SAM for less verbose CF
+
+Description: 
+  Static web hosting with continuous deployment pipeline.
+
+Parameters: 
+  EnvironmentName:
+    Type: String
+    Default: cicd-stack
+    Description: "Environment prefixing resources, tagging resources and for importing resources from other stacks"
+
+  GithubOAuthToken:
+    Type: String
+    Description: "OAuth token for Github"
+
+  GithubBranchName:
+    Type: String
+    Description: "GitHub Branch name"
+
+  GithubRepoOwner:
+    Type: String
+    Description: "GitHub repo owner user-name. Must be owner"
+
+  GithubRepoName:
+    Type: String
+    Description: "GitHub repo name"
+
+  BuildSpecFilePath:
+    Description: Relative BuildSpec file path for build stage. For more information, see https://docs.aws.amazon.com/codebuild/latest/userguide/build-spec-ref.html
+    Type: String
+    Default: "buildspec.yml"
+
+Resources: 
+  ### STATIC HOSTING 
+
+  # Bucket to host static web assets
+  HostingBucket: 
+    Type: AWS::S3::Bucket
+    Properties: 
+      AccessControl: Private
+      Tags:
+        - Key: project
+          Value: !Sub ${EnvironmentName}
+
+  # Identity to allow cloudFront to access our private bucket.
+  CloudFrontOriginAccessIdentity: 
+    Type: 'AWS::CloudFront::CloudFrontOriginAccessIdentity'
+    Properties:
+      CloudFrontOriginAccessIdentityConfig:
+        Comment: !Ref HostingBucket
+
+  # Bucket policy that allows the aboe OAI to access the buvket.
+  HostingBucketPolicy: 
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref HostingBucket
+      PolicyDocument:
+        Statement:
+          - Action:
+              - s3:GetObject
+            Effect: Allow
+            Resource:
+              - !Join
+                - ''
+                - - 'arn:aws:s3:::'
+                  - !Ref HostingBucket
+                  - '/*'
+            Principal: 
+              AWS: !Join
+                - ''
+                - - 'arn:aws:iam::cloudfront:user/CloudFront Origin Access Identity '
+                  - !Ref CloudFrontOriginAccessIdentity
+
+  # CDN to front and cache website
+  cloudfrontDistribution: 
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Aliases:
+          - "upload.enpalm.se"
+        DefaultCacheBehavior: 
+          AllowedMethods: # Which methods to forward to S3
+            - GET
+            - HEAD
+            - OPTIONS
+          CachedMethods: # Which methods to cache responses for at cloudfront
+            - GET
+            - HEAD
+            - OPTIONS
+          Compress: true
+          DefaultTTL: 60 # in seconds
+          MaxTTL: 240 # in seconds
+          MinTTL: 60 # in seconds
+          ViewerProtocolPolicy: redirect-to-https
+          ForwardedValues:
+            Cookies:
+              Forward: none
+            QueryString: false
+          TargetOriginId: s3origin # Unsure what this does, but required property
+        DefaultRootObject: index.html
+        Enabled: true
+        HttpVersion: http2
+        PriceClass: PriceClass_All
+        Origins:
+          - DomainName: !GetAtt HostingBucket.RegionalDomainName
+            Id: s3origin
+            S3OriginConfig:
+              OriginAccessIdentity: !Sub origin-access-identity/cloudfront/${CloudFrontOriginAccessIdentity}
+        IPV6Enabled: false
+        ViewerCertificate:
+          AcmCertificateArn: arn:aws:acm:us-east-1:641758013508:certificate/c39e3808-3fbb-4457-80c2-f59039fbfc20
+          MinimumProtocolVersion: TLSv1
+          SslSupportMethod: sni-only
+      Tags:
+        - Key: project
+          Value: !Sub ${EnvironmentName}
+
+  ### CD PIPELINE
+  # Bucket to host pipeline artifacts 
+  CodePipelineArtifactStoreBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      Tags:
+        - Key: project
+          Value: !Ref EnvironmentName
+  
+  # Pipeline to orchestrate stages
+  CodePipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Name: !Sub ${EnvironmentName}-cd-pipeline-github
+      RoleArn: !GetAtt CodePipelineServiceRole.Arn
+      ArtifactStore:
+        Type: S3
+        Location: !Ref CodePipelineArtifactStoreBucket
+      Stages: 
+        - Name: Source
+          Actions:
+            - Name: GithubSourceAction
+              OutputArtifacts:
+                - Name: SourceOutput
+              ActionTypeId:
+                Category: Source
+                Owner: ThirdParty
+                Version: '1'
+                Provider: GitHub
+              Configuration:
+                Owner: !Ref GithubRepoOwner
+                Repo: !Ref GithubRepoName
+                Branch: !Ref GithubBranchName
+                OAuthToken: !Ref GithubOAuthToken # This is written in plaintext in console. Better to use secrets manager: {{resolve:secretsmanager:MyGitHubSecret:SecretString:token}}
+              RunOrder: 1
+        - Name: Build
+          Actions:
+            - Name: BuildAction
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              Configuration:
+                ProjectName: !Ref BuildProject
+              InputArtifacts:
+                - Name: SourceOutput
+              OutputArtifacts:
+                - Name: BuildOutput
+              RunOrder: 2
+        - Name: Deploy
+          Actions:
+            - Name: DeployAction
+              InputArtifacts:
+                - Name: BuildOutput
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: S3
+                Version: '1'
+              Configuration:
+                BucketName: !Ref HostingBucket
+                Extract: true
+              RunOrder: 3
+      Tags:
+        - Key: project
+          Value: !Ref EnvironmentName
+      RestartExecutionOnUpdate: true # Automatically run pipeline after it's been updated.
+
+  # Role used by CodePipeline
+  CodePipelineServiceRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - codepipeline.amazonaws.com
+            Action: 'sts:AssumeRole'
+      Policies:
+        - PolicyName: !Sub ${EnvironmentName}-codepipeline-service-role
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: # TODO: SCOPE DOWN!!!
+                  - codebuild:*
+                  - s3:*
+                Resource: '*'
+
+  # Build project to use in CodePipeline Build stage
+  BuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      ServiceRole: !GetAtt BuildProjectRole.Arn
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: !Ref BuildSpecFilePath
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL # SMALL | MEDIUM | LARGE
+        Image: 'aws/codebuild/standard:3.0'
+        Type: LINUX_CONTAINER
+        EnvironmentVariables: # Inject env variables into codeBuild (accessible as ${Name} in the buildspec.yml)
+          - Name: HOSTING_BUCKET
+            Value: !Ref HostingBucket
+          - Name: IDENTITY_POOL_ID
+            Value: !Ref IdentityPool
+          - Name: AWS_REGION
+            Value: !Ref AWS::Region
+          - Name: USERPOOL_ID
+            Value: !Ref UserPool
+          - Name: USERPOOL_CLIENT_ID
+            Value: !Ref UserPoolClient
+
+      Tags:
+        - Key: project
+          Value: !Ref EnvironmentName
+
+  # Role used bu the build project
+  BuildProjectRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - codebuild.amazonaws.com
+            Action: 'sts:AssumeRole'
+      Policies:
+        - PolicyName: !Sub ${EnvironmentName}-codebuild-service-role
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: # TODO: SCOPE DOWN!!!
+                  - logs:*
+                  - s3:*
+                Resource: '*'
+
+  # Webhook to trigger pipeline
+  GitHubWebhook:
+    Type: 'AWS::CodePipeline::Webhook'
+    Properties:
+      AuthenticationConfiguration:
+        SecretToken: !Ref GithubOAuthToken
+      Filters:
+        - JsonPath: "$.ref"
+          MatchEquals: refs/heads/{Branch}
+      Authentication: GITHUB_HMAC
+      TargetPipeline: !Ref CodePipeline
+      TargetAction: GithubSourceAction
+      TargetPipelineVersion: !GetAtt CodePipeline.Version
+      RegisterWithThirdParty: true
+
+  ################## 
+  # Authentication #
+  ##################
+
+ # Cognito UserPool used for authenticting users and locking down AppSync API
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      AutoVerifiedAttributes:
+        - email
+      UserPoolName: !Sub ${EnvironmentName}-userPool
+      MfaConfiguration: "OFF"
+      EmailConfiguration:
+        EmailSendingAccount: COGNITO_DEFAULT
+      Schema:
+        - Name: email
+          AttributeDataType: String
+          Mutable: false
+          Required: true
+
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: !Sub ${EnvironmentName}-userPoolClient
+      GenerateSecret: false
+      UserPoolId: !Ref UserPool
+
+  # Creates a federeated Identity pool
+  IdentityPool:
+    Type: AWS::Cognito::IdentityPool
+    Properties:
+      IdentityPoolName: !Sub ${EnvironmentName}-IdentityPool
+      AllowUnauthenticatedIdentities: false
+      CognitoIdentityProviders:
+        - ClientId: !Ref UserPoolClient
+          ProviderName: !GetAtt UserPool.ProviderName
+
+  # Create a role for unauthorized acces to AWS resources.
+  CognitoUnAuthorizedRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Federated: "cognito-identity.amazonaws.com"
+            Action:
+              - "sts:AssumeRoleWithWebIdentity"
+            Condition:
+              StringEquals:
+                "cognito-identity.amazonaws.com:aud": !Ref IdentityPool
+              "ForAnyValue:StringLike":
+                "cognito-identity.amazonaws.com:amr": unauthenticated
+      Policies:
+        - PolicyName: !Sub ${EnvironmentName}-CognitoUnAuth-Policy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "mobileanalytics:PutEvents"
+                  - "cognito-sync:*"
+                  - "cognito-identity:*"
+                Resource: "*"
+
+  # Create a role for authorized acces to AWS resources.
+  CognitoAuthorizedRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Federated: "cognito-identity.amazonaws.com"
+            Action:
+              - "sts:AssumeRoleWithWebIdentity"
+            Condition:
+              StringEquals:
+                "cognito-identity.amazonaws.com:aud": !Ref IdentityPool
+              "ForAnyValue:StringLike":
+                "cognito-identity.amazonaws.com:amr": authenticated
+      Policies:
+        - PolicyName: !Sub ${EnvironmentName}-CognitoAuth-Policy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "mobileanalytics:PutEvents"
+                  - "cognito-sync:*"
+                  - "cognito-identity:*"
+                Resource: "*"
+
+  # Assigns the roles to the Identity Pool
+  IdentityPoolRoleMapping:
+    Type: AWS::Cognito::IdentityPoolRoleAttachment
+    Properties:
+      IdentityPoolId: !Ref IdentityPool
+      Roles:
+        authenticated: !GetAtt CognitoAuthorizedRole.Arn
+        unauthenticated: !GetAtt CognitoUnAuthorizedRole.Arn  
+
+  ##################### 
+  # Gen Dashboard URL #
+  #####################  
+
+  # GenEmbedUrlLambda:
+  #   Type: AWS::Serverless::Function
+  #   Properties:
+  #     Handler: ./Functions/GenEmbedUrl.handler
+  #     Runtime: nodejs12.x
+  #     MemorySize: 128
+  #     Timeout: 10
+  #     Description: Generates QuickSight embedded URL for application
+  #     Tracing: Active
+  #     Policies:
+  #       - Version: '2012-10-17' 
+  #         Statement:
+  #           - Effect: "Allow"
+  #             Action:
+  #               - "quicksight:GetDashboardEmbedUrl"
+  #               - "quicksight:GetAnonymousUserEmbedUrl"
+  #             Resource: "*"
+  #     Environment:
+  #       Variables:
+  #         AWS_ACCOUNT_ID: !Ref AWS::AccountId
+  #     Events:
+  #       Root:
+  #         Type: Api
+  #         Properties:
+  #           RestApiId: !Ref MyApi
+  #           Path: /
+  #           Method: GET
+  #     Tags:
+  #       project: !Ref EnvironmentName
+
+  # MyApi:
+  #   Type: AWS::Serverless::Api
+  #   Properties:
+  #     DefinitionBody:
+  #       Fn::Transform:
+  #         Name: "AWS::Include"
+  #         Parameters:
+  #           Location: "./openapi.yml"
+  #     EndpointConfiguration: REGIONAL
+  #     StageName: prod
+  #     TracingEnabled: true
+  #     Tags:
+  #       project: !Ref EnvironmentName
+
+Outputs:
+  DomainName:
+    Description: Cloudfront Domain
+    Value: !GetAtt cloudfrontDistribution.DomainName
+  UserPoolId:
+    Value: !Ref UserPool
+  UserPoolClientId:
+    Value: !Ref UserPoolClient
+  IdentityPoolId:
+    Value: !Ref IdentityPool
+  # WebEndpoint:
+  #   Description: "API Gateway endpoint URL for prod stage"
+  #   Value: !Sub "https://${MyApi}.execute-api.${AWS::Region}.amazonaws.com/prod/"
