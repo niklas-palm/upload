@@ -24,3 +24,6 @@ yarn-error.log*
 
 samconfig.toml
 .aws-sam/
+
+# Variables are propagted into codebuild in the cfn template instead
+*aws-exports.js

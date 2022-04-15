@@ -43,6 +43,28 @@ Resources:
         - Key: project
           Value: !Sub ${EnvironmentName}
 
+  # Bucket to upload data to 
+  UploadBucket: 
+    Type: AWS::S3::Bucket
+    Properties: 
+      AccessControl: Private
+      CorsConfiguration:
+        CorsRules:
+          - AllowedHeaders:
+              - '*'
+            AllowedMethods:
+              - GET
+              - POST
+              - PUT
+              - HEAD
+            AllowedOrigins:
+              - '*'
+            Id: myCORSRuleId1
+            MaxAge: 3600
+      Tags:
+        - Key: project
+          Value: !Sub ${EnvironmentName}
+
   # Identity to allow cloudFront to access our private bucket.
   CloudFrontOriginAccessIdentity: 
     Type: 'AWS::CloudFront::CloudFrontOriginAccessIdentity'
@@ -220,7 +242,7 @@ Resources:
         Type: CODEPIPELINE
       Environment:
         ComputeType: BUILD_GENERAL1_SMALL # SMALL | MEDIUM | LARGE
-        Image: 'aws/codebuild/standard:3.0'
+        Image: 'aws/codebuild/standard:5.0'
         Type: LINUX_CONTAINER
         EnvironmentVariables: # Inject env variables into codeBuild (accessible as ${Name} in the buildspec.yml)
           - Name: HOSTING_BUCKET
@@ -341,6 +363,10 @@ Resources:
                   - "cognito-sync:*"
                   - "cognito-identity:*"
                 Resource: "*"
+              - Effect: "Allow"
+                Action:
+                  - "s3:*"
+                Resource: !Sub 'arn:aws:s3:::${UploadBucket}/*'
 
   # Create a role for authorized acces to AWS resources.
   CognitoAuthorizedRole:
@@ -381,52 +407,32 @@ Resources:
         unauthenticated: !GetAtt CognitoUnAuthorizedRole.Arn  
 
   ##################### 
-  # Gen Dashboard URL #
+  # Gen presigned URL #
   #####################  
 
-  # GenEmbedUrlLambda:
-  #   Type: AWS::Serverless::Function
-  #   Properties:
-  #     Handler: ./Functions/GenEmbedUrl.handler
-  #     Runtime: nodejs12.x
-  #     MemorySize: 128
-  #     Timeout: 10
-  #     Description: Generates QuickSight embedded URL for application
-  #     Tracing: Active
-  #     Policies:
-  #       - Version: '2012-10-17' 
-  #         Statement:
-  #           - Effect: "Allow"
-  #             Action:
-  #               - "quicksight:GetDashboardEmbedUrl"
-  #               - "quicksight:GetAnonymousUserEmbedUrl"
-  #             Resource: "*"
-  #     Environment:
-  #       Variables:
-  #         AWS_ACCOUNT_ID: !Ref AWS::AccountId
-  #     Events:
-  #       Root:
-  #         Type: Api
-  #         Properties:
-  #           RestApiId: !Ref MyApi
-  #           Path: /
-  #           Method: GET
-  #     Tags:
-  #       project: !Ref EnvironmentName
 
-  # MyApi:
-  #   Type: AWS::Serverless::Api
-  #   Properties:
-  #     DefinitionBody:
-  #       Fn::Transform:
-  #         Name: "AWS::Include"
-  #         Parameters:
-  #           Location: "./openapi.yml"
-  #     EndpointConfiguration: REGIONAL
-  #     StageName: prod
-  #     TracingEnabled: true
-  #     Tags:
-  #       project: !Ref EnvironmentName
+  GenPresignedUrlLambda:
+      Type: AWS::Serverless::Function
+      Properties:
+        CodeUri: gen_presign/
+        Handler: app.lambda_handler
+        Runtime: python3.9
+        Environment:
+          Variables:
+            INGEST_BUCKET: !Ref UploadBucket
+        Policies:
+          - Statement:
+            - Sid: GenPresignedPermissionPolicy
+              Effect: Allow
+              Action:
+              - s3:GetObject
+              - s3:PutObject
+              Resource: !Sub 'arn:aws:s3:::${UploadBucket}/*'
+        FunctionUrlConfig:
+          AuthType: NONE
+          Cors:
+              AllowOrigins:
+                  - "*"
 
 Outputs:
   DomainName:
