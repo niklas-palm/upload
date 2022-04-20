@@ -7,8 +7,6 @@ export const getPresigned = async (file_type) => {
   const URL = API_URL + "?file=" + file_type;
 
   const { data, status } = await axios.get(URL);
-  console.log("statusCode: ", status);
-  console.log("Response body: ", data);
 
   return data;
 };

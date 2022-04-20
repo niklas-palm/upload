@@ -48,6 +48,11 @@ Resources:
     Type: AWS::S3::Bucket
     Properties: 
       AccessControl: Private
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpiteRule
+            Status: Enabled
+            ExpirationInDays: 20
       CorsConfiguration:
         CorsRules:
           - AllowedHeaders:
@@ -407,9 +412,8 @@ Resources:
         unauthenticated: !GetAtt CognitoUnAuthorizedRole.Arn  
 
   ##################### 
-  # Gen presigned URL #
+  # Gen presigned URLs #
   #####################  
-
 
   GenPresignedUrlLambda:
       Type: AWS::Serverless::Function
@@ -434,6 +438,34 @@ Resources:
               AllowOrigins:
                   - "*"
 
+
+  GenPresignedReadLambda:
+    Type: AWS::Serverless::Function # More info about Function Resource: https://github.com/awslabs/serverless-application-model/blob/master/versions/2016-10-31.md#awsserverlessfunction
+    Properties:
+      CodeUri: publish_sns/
+      Handler: app.lambda_handler
+      Runtime: python3.9
+      Environment:
+        Variables:
+          TOPIC_ARN: !Ref DataUploadedSnsTopic
+      Policies:
+        - Statement:
+          - Effect: Allow
+            Action:
+              - s3:*
+            Resource: '*' # To avoid circular dependency, this access to all S3 buckets.. Poor practice but simple work-around
+        - SNSPublishMessagePolicy:
+            TopicName: !GetAtt DataUploadedSnsTopic.TopicName
+      Events:
+        S3Event:
+          Type: S3
+          Properties:
+            Bucket: !Ref UploadBucket
+            Events: s3:ObjectCreated:*
+
+  DataUploadedSnsTopic:
+    Type: AWS::SNS::Topic
+
 Outputs:
   DomainName:
     Description: Cloudfront Domain
@@ -444,6 +476,3 @@ Outputs:
     Value: !Ref UserPoolClient
   IdentityPoolId:
     Value: !Ref IdentityPool
-  # WebEndpoint:
-  #   Description: "API Gateway endpoint URL for prod stage"
-  #   Value: !Sub "https://${MyApi}.execute-api.${AWS::Region}.amazonaws.com/prod/"
