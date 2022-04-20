@@ -1,25 +1,31 @@
-import logo from "./logo.svg";
 import axios from "axios";
+import { Loading } from "@geist-ui/core";
+import { useState } from "react";
+
+import { getPresigned } from "./utils";
 
 import "./App.css";
 
-const API_URL =
-  "https://cgyzpsvin6m6bbqnjc2574iknu0wzzev.lambda-url.eu-north-1.on.aws/";
+const App = () => {
+  const [loading, setLoading] = useState(false);
+  const [statusText, setStatusText] = useState("");
 
-function App() {
-  const onUploadClick = async (e) => {
-    let files = e.target.files;
+  const getFileType = (files) => {
     let split = files[0].name.split(".");
     let file_type = split[split.length - 1];
-    console.log(file_type);
 
-    let presigned = await getPresigned(file_type);
-    console.log("presigned");
-    console.log(presigned);
+    return file_type;
+  };
+
+  const onUploadClick = async (e) => {
+    setStatusText("");
+    let files = e.target.files;
+
+    let file_type = getFileType(files); // Get the file suffix
+
+    let presigned = await getPresigned(file_type); // Get presigned URL for upload
 
     const file = files[0];
-    console.log("file");
-    console.log(file);
 
     const formData = new FormData();
 
@@ -27,46 +33,32 @@ function App() {
       formData.append(k, v);
     });
     formData.append("file", file); // The file has be the last element
-    console.log("formdata");
 
-    const config = {
-      onUploadProgress: function (progressEvent) {
-        var percentCompleted = Math.round(
-          (progressEvent.loaded * 100) / progressEvent.total
-        );
-        console.log(percentCompleted);
-      },
-    };
+    setLoading(true);
 
-    const response = await axios.post(
-      presigned.url,
-      formData,
-      {
-        headers: { "Content-Type": "multipart/form-data" },
-      },
-      config
-    );
+    const response = await axios.post(presigned.url, formData, {
+      headers: { "Content-Type": "multipart/form-data" },
+    });
 
-    console.log(response);
-  };
+    setLoading(false);
 
-  const getPresigned = async (file_type) => {
-    const URL = API_URL + "?file=" + file_type;
-
-    const { data, status } = await axios.get(URL);
-    console.log("statusCode: ", status);
-    console.log("Response body: ", data);
-
-    return data;
+    if (response.status === 204) {
+      setStatusText("Data has been successfully uploaded");
+    } else {
+      console.log("ERROR");
+      setStatusText(response.statusText);
+    }
   };
 
   return (
     <div className="App">
       <header className="App-header">
         <input type="file" id="file" name="file" onChange={onUploadClick} />
+        {loading ? <Loading color="green" font="1.5em" /> : null}
+        {statusText ? <p>{statusText}</p> : null}
       </header>
     </div>
   );
-}
+};
 
 export default App;
