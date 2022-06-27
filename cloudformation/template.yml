@@ -436,7 +436,7 @@ Resources:
           AuthType: NONE
           Cors:
               AllowOrigins:
-                  - "*"
+                  - "https://upload.enpalm.se"
 
 
   GenPresignedReadLambda:
